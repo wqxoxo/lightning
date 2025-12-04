@@ -1,0 +1,59 @@
+name: Flaky Test Check
+on:
+  workflow_dispatch:
+    inputs:
+      test_name:
+        description: 'Test to run (e.g., tests/test_cln_rs.py::test_grpc_connect_notification)'
+        required: true
+        default: 'tests/test_cln_rs.py::test_grpc_connect_notification'
+      runs:
+        description: 'Number of times to run'
+        required: true
+        default: '10'
+
+jobs:
+  flaky-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: bash -x .github/scripts/setup.sh
+
+      - name: Build
+        run: |
+          source $HOME/.cargo/env
+          ./configure --disable-valgrind
+          uv run make -j$(nproc)
+
+      - name: Run test ${{ github.event.inputs.runs }} times
+        run: |
+          source $HOME/.cargo/env
+          PASS=0
+          FAIL=0
+          for i in $(seq 1 ${{ github.event.inputs.runs }}); do
+            echo "=== Run $i ==="
+            if timeout 180 uv run pytest ${{ github.event.inputs.test_name }} -v; then
+              PASS=$((PASS + 1))
+              echo "Run $i: PASSED"
+            else
+              FAIL=$((FAIL + 1))
+              echo "Run $i: FAILED"
+            fi
+          done
+          echo ""
+          echo "=== RESULTS ==="
+          echo "Passed: $PASS / ${{ github.event.inputs.runs }}"
+          echo "Failed: $FAIL / ${{ github.event.inputs.runs }}"
+          if [ $FAIL -gt 0 ]; then
+            exit 1
+          fi
