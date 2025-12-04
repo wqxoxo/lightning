@@ -4842,7 +4842,9 @@ def test_fetchinvoice_disconnected_reply(node_factory, bitcoind):
     # l2 is already connected to l3, so it can fetch.  It specifies a reply
     # path of l1->l2.  l3 knows it can simply route reply to l1 via l2.
     l2.rpc.call('fetchinvoice', {'offer': offer['bolt12'], 'dev_reply_path': [l1.info['id'], l2.info['id']]})
-    assert l3.rpc.listpeers(l1.info['id']) == {'peers': []}
+    # l3 should not need to connect directly to l1 (routes reply via l2).
+    # Use wait_for in case there's a transient connection being torn down.
+    wait_for(lambda: l3.rpc.listpeers(l1.info['id']) == {'peers': []})
 
 
 def test_pay_blockheight_mismatch(node_factory, bitcoind):
