@@ -18,27 +18,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            autoconf automake build-essential git libtool libsqlite3-dev \
-            python3 python3-pip net-tools zlib1g-dev libsodium-dev gettext \
-            python3-dev python3-mako lowdown bitcoind jq
-          pip3 install --user mako pytest pytest-xdist
+        run: bash -x .github/scripts/setup.sh
 
       - name: Build
         run: |
+          source $HOME/.cargo/env
           ./configure --disable-valgrind
           make -j$(nproc)
 
       - name: Run test ${{ github.event.inputs.runs }} times
         run: |
+          source $HOME/.cargo/env
           PASS=0
           FAIL=0
           for i in $(seq 1 ${{ github.event.inputs.runs }}); do
             echo "=== Run $i ==="
-            if timeout 180 pytest ${{ github.event.inputs.test_name }} -v; then
+            if timeout 180 uv run pytest ${{ github.event.inputs.test_name }} -v; then
               PASS=$((PASS + 1))
               echo "Run $i: PASSED"
             else
