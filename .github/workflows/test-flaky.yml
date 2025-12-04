@@ -36,10 +36,14 @@ jobs:
           uv run make -j$(nproc)
 
       - name: Run test ${{ github.event.inputs.runs }} times
+        env:
+          SLOW_MACHINE: 1
         run: |
           source $HOME/.cargo/env
           PASS=0
           FAIL=0
+          # Run with same settings as upstream CI: SLOW_MACHINE=1
+          # Also run some background load to simulate parallel test contention
           for i in $(seq 1 ${{ github.event.inputs.runs }}); do
             echo "=== Run $i ==="
             if timeout 180 uv run pytest ${{ github.event.inputs.test_name }} -v; then
