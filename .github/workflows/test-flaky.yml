@@ -1,0 +1,77 @@
+name: Flaky Test Check
+on:
+  workflow_dispatch:
+    inputs:
+      test_name:
+        description: 'Test to run (e.g., tests/test_cln_rs.py::test_grpc_connect_notification)'
+        required: true
+        default: 'tests/test_cln_rs.py::test_grpc_connect_notification'
+      runs:
+        description: 'Number of times to run'
+        required: true
+        default: '10'
+
+jobs:
+  flaky-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: bash -x .github/scripts/setup.sh
+
+      - name: Build
+        run: |
+          source $HOME/.cargo/env
+          ./configure --disable-valgrind
+          uv run make -j$(nproc)
+
+      - name: Run test ${{ github.event.inputs.runs }} times (upstream-style parallel)
+        env:
+          SLOW_MACHINE: 1
+          EXPERIMENTAL_DUAL_FUND: 1
+          PYTEST_PAR: 10
+          TEST_DEBUG: 1
+        run: |
+          source $HOME/.cargo/env
+
+          # Match upstream CI exactly: run target test alongside other tests
+          # using pytest-xdist (-n 10) for true parallel execution
+          echo "Running tests with PYTEST_PAR=10 (upstream-style parallel execution)"
+
+          # Collect 9 other tests to run in parallel with our target test
+          # These are fast tests that will create realistic contention
+          PARALLEL_TESTS="tests/test_misc.py::test_names tests/test_misc.py::test_bitcoin_ibd tests/test_misc.py::test_htlc_in_timeout tests/test_closing.py::test_closing_simple tests/test_connection.py::test_connect_basic tests/test_invoices.py::test_invoice tests/test_invoices.py::test_invoice_zeroval tests/test_pay.py::test_pay_limits tests/test_connection.py::test_remote_addr"
+
+          PASS=0
+          FAIL=0
+          for i in $(seq 1 ${{ github.event.inputs.runs }}); do
+            echo "=== Run $i ==="
+            # Run target test with 9 other tests in parallel using pytest-xdist
+            # This matches upstream: pytest tests/ -n 10
+            if timeout 300 uv run eatmydata pytest ${{ github.event.inputs.test_name }} ${PARALLEL_TESTS} -v -n ${PYTEST_PAR} --timeout=180; then
+              # Check if our specific test passed (it might pass while others fail)
+              PASS=$((PASS + 1))
+              echo "Run $i: PASSED"
+            else
+              FAIL=$((FAIL + 1))
+              echo "Run $i: FAILED"
+            fi
+          done
+
+          echo ""
+          echo "=== RESULTS ==="
+          echo "Passed: $PASS / ${{ github.event.inputs.runs }}"
+          echo "Failed: $FAIL / ${{ github.event.inputs.runs }}"
+          if [ $FAIL -gt 0 ]; then
+            exit 1
+          fi
