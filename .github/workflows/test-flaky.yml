@@ -38,6 +38,7 @@ jobs:
       - name: Run test ${{ github.event.inputs.runs }} times
         env:
           SLOW_MACHINE: 1
+          EXPERIMENTAL_DUAL_FUND: 1
         run: |
           source $HOME/.cargo/env
 
