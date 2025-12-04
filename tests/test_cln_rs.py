@@ -428,12 +428,18 @@ def test_grpc_block_added_notifications(node_factory, bitcoind):
 def test_grpc_connect_notification(node_factory):
     l1, l2 = node_factory.get_nodes(2)
 
-    # Test the connect notification
+    # Connect first, then subscribe - this ensures the subscription is
+    # registered on the server before we trigger the event we want to catch.
+    l2.connect(l1)
+
     connect_stream = l1.grpc.SubscribeConnect(clnpb.StreamConnectRequest())
 
-    # FIXME: The above does not seem to be synchronous, causing a flake.  Wait
-    # until it does something (and this seems to be something!)
+    # Wait for the gRPC connection to be established
     l1.daemon.wait_for_log('plugin-cln-grpc: received settings ACK')
+
+    # Disconnect and reconnect - the reconnection event will be caught
+    l2.rpc.disconnect(l1.info['id'], force=True)
+    wait_for(lambda: l1.rpc.listpeers(l2.info['id'])['peers'] == [])
     l2.connect(l1)
 
     for connect_event in connect_stream:
