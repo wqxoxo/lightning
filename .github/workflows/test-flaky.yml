@@ -40,10 +40,24 @@ jobs:
           SLOW_MACHINE: 1
         run: |
           source $HOME/.cargo/env
+
+          # Start background load to simulate parallel test execution
+          # This mimics upstream CI's PYTEST_PAR=10 resource contention
+          echo "Starting background load processes..."
+          for j in 1 2 3 4 5; do
+            (while true; do
+              uv run pytest tests/test_misc.py::test_bech32_funding -v --timeout=60 2>&1 | tail -1
+              sleep 1
+            done) &
+          done
+          LOAD_PIDS=$(jobs -p)
+          echo "Background PIDs: $LOAD_PIDS"
+
+          # Give background tests a moment to start
+          sleep 5
+
           PASS=0
           FAIL=0
-          # Run with same settings as upstream CI: SLOW_MACHINE=1
-          # Also run some background load to simulate parallel test contention
           for i in $(seq 1 ${{ github.event.inputs.runs }}); do
             echo "=== Run $i ==="
             if timeout 180 uv run pytest ${{ github.event.inputs.test_name }} -v; then
@@ -54,6 +68,12 @@ jobs:
               echo "Run $i: FAILED"
             fi
           done
+
+          # Kill background load
+          echo "Stopping background load..."
+          kill $LOAD_PIDS 2>/dev/null || true
+          wait 2>/dev/null || true
+
           echo ""
           echo "=== RESULTS ==="
           echo "Passed: $PASS / ${{ github.event.inputs.runs }}"
