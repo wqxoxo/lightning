@@ -6,18 +6,115 @@ on:
         description: 'Test to run (e.g., tests/test_pay.py::test_fetchinvoice_disconnected_reply)'
         required: true
         default: 'tests/test_pay.py::test_fetchinvoice_disconnected_reply'
-      parallel_runs:
-        description: 'Number of parallel full-suite runs (each is a separate job)'
+      mode:
+        description: 'Mode: "loop" runs target test N times per job, "suite" runs full test suite'
         required: true
-        default: '10'
+        default: 'loop'
+        type: choice
+        options:
+          - loop
+          - suite
+      iterations:
+        description: 'For loop mode: iterations per job. For suite mode: number of parallel jobs'
+        required: true
+        default: '50'
       test_ref:
         description: 'Git ref to test (branch/commit SHA)'
         required: true
         default: 'master'
 
 jobs:
-  # Run N parallel full-suite tests to reproduce flakiness
-  flaky-test:
+  # Mode: loop - Run target test N times in each of 5 parallel jobs
+  flaky-loop:
+    if: ${{ github.event.inputs.mode == 'loop' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        job_id: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout specific ref
+        run: git checkout ${{ github.event.inputs.test_ref }}
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: bash -x .github/scripts/setup.sh
+
+      - name: Build
+        run: |
+          source $HOME/.cargo/env
+          ./configure --enable-debugbuild --disable-valgrind
+          uv run make -j$(nproc)
+
+      - name: Run target test ${{ github.event.inputs.iterations }} times (job ${{ matrix.job_id }})
+        env:
+          SLOW_MACHINE: 1
+          TEST_DEBUG: 1
+          VALGRIND: 0
+          ITERATIONS: ${{ github.event.inputs.iterations }}
+          TEST_NAME: ${{ github.event.inputs.test_name }}
+        run: |
+          source $HOME/.cargo/env
+
+          echo "=== Flaky Test Loop ==="
+          echo "Test: $TEST_NAME"
+          echo "Iterations: $ITERATIONS"
+          echo "Job: ${{ matrix.job_id }}/5"
+          echo ""
+
+          PASSED=0
+          FAILED=0
+
+          for i in $(seq 1 $ITERATIONS); do
+            echo "--- Run $i/$ITERATIONS ---"
+            if timeout 300 uv run pytest "$TEST_NAME" -v --tb=short 2>&1 | tee run_$i.log | tail -5; then
+              PASSED=$((PASSED + 1))
+              echo "PASS"
+            else
+              FAILED=$((FAILED + 1))
+              echo "FAIL"
+              # Save failure log
+              cp run_$i.log "failure_${i}.log"
+            fi
+          done
+
+          echo ""
+          echo "=== Job ${{ matrix.job_id }} Results ==="
+          echo "PASSED: $PASSED"
+          echo "FAILED: $FAILED"
+          echo "FLAKE_RATE: $((FAILED * 100 / ITERATIONS))%"
+
+          # Create summary file
+          echo "$PASSED,$FAILED,$ITERATIONS" > results.csv
+
+          # Fail job if any failures (so we can see them)
+          if [ $FAILED -gt 0 ]; then
+            echo "::error::Test failed $FAILED times out of $ITERATIONS"
+            exit 1
+          fi
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs-job-${{ matrix.job_id }}
+          path: failure_*.log
+
+  # Mode: suite - Run full test suite in parallel jobs (original behavior)
+  flaky-suite:
+    if: ${{ github.event.inputs.mode == 'suite' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     strategy:
@@ -27,7 +124,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Fetch full history to support commit SHA references
           fetch-depth: 0
 
       - name: Checkout specific ref
@@ -64,7 +160,7 @@ jobs:
           echo "Target test: ${{ github.event.inputs.test_name }}"
           echo "Git ref: ${{ github.event.inputs.test_ref }}"
 
-          # Run full test suite like upstream
+          # Run full test suite WITHOUT reruns (to catch flakes)
           set +e
           timeout 3600 uv run eatmydata pytest tests/ -v -n ${PYTEST_PAR} --timeout=1200 2>&1 | tee test_output.log
           SUITE_EXIT=$?
@@ -79,13 +175,6 @@ jobs:
             echo "Target test passed (or was not run)"
           fi
 
-          # Check if target test was skipped
-          if grep -q "SKIPPED.*${{ github.event.inputs.test_name }}" test_output.log 2>/dev/null; then
-            echo "target_skipped=true" >> $GITHUB_OUTPUT
-          else
-            echo "target_skipped=false" >> $GITHUB_OUTPUT
-          fi
-
           echo "suite_passed=$([[ $SUITE_EXIT -eq 0 ]] && echo true || echo false)" >> $GITHUB_OUTPUT
 
       - name: Upload test log
@@ -95,11 +184,30 @@ jobs:
           name: test-log-run-${{ matrix.run_id }}
           path: test_output.log
 
-  # Aggregate results from all parallel runs
-  summarize:
-    needs: flaky-test
+  # Summary job for loop mode
+  summarize-loop:
+    needs: flaky-loop
+    if: ${{ always() && github.event.inputs.mode == 'loop' }}
     runs-on: ubuntu-22.04
-    if: always()
+    steps:
+      - name: Summarize results
+        run: |
+          echo "=========================================="
+          echo "FLAKY TEST LOOP RESULTS"
+          echo "=========================================="
+          echo "Test: ${{ github.event.inputs.test_name }}"
+          echo "Git ref: ${{ github.event.inputs.test_ref }}"
+          echo "Iterations per job: ${{ github.event.inputs.iterations }}"
+          echo "Total iterations: $(( 5 * ${{ github.event.inputs.iterations }} ))"
+          echo ""
+          echo "Check individual job results above."
+          echo "Any job with failures indicates flaky behavior."
+
+  # Summary job for suite mode
+  summarize-suite:
+    needs: flaky-suite
+    if: ${{ always() && github.event.inputs.mode == 'suite' }}
+    runs-on: ubuntu-22.04
     steps:
       - name: Download all logs
         uses: actions/download-artifact@v4
@@ -110,7 +218,7 @@ jobs:
       - name: Summarize results
         run: |
           echo "=========================================="
-          echo "FLAKY TEST REPRODUCTION RESULTS"
+          echo "FLAKY TEST SUITE RESULTS"
           echo "=========================================="
           echo "Test: ${{ github.event.inputs.test_name }}"
           echo "Git ref: ${{ github.event.inputs.test_ref }}"
@@ -118,41 +226,22 @@ jobs:
 
           TOTAL=0
           TARGET_FAILED=0
-          TARGET_SKIPPED=0
 
-          for log in test-log-run-*/test_output.log; do
+          for log in */test_output.log test_output.log 2>/dev/null; do
             if [ -f "$log" ]; then
               TOTAL=$((TOTAL + 1))
               if grep -q "FAILED.*${{ github.event.inputs.test_name }}" "$log" 2>/dev/null; then
                 TARGET_FAILED=$((TARGET_FAILED + 1))
-                echo "Run $(basename $(dirname $log)): FAILED"
-              elif grep -q "SKIPPED.*${{ github.event.inputs.test_name }}" "$log" 2>/dev/null; then
-                TARGET_SKIPPED=$((TARGET_SKIPPED + 1))
-                echo "Run $(basename $(dirname $log)): SKIPPED"
+                echo "Run $TOTAL: TARGET FAILED"
               else
-                echo "Run $(basename $(dirname $log)): PASSED"
+                echo "Run $TOTAL: passed"
               fi
             fi
           done
 
           echo ""
           echo "=========================================="
-          echo "SUMMARY"
-          echo "=========================================="
-          echo "Total runs: $TOTAL"
-          echo "Target test FAILED: $TARGET_FAILED"
-          echo "Target test SKIPPED: $TARGET_SKIPPED"
-          echo "Target test PASSED: $((TOTAL - TARGET_FAILED - TARGET_SKIPPED))"
-
+          echo "Target test FAILED: $TARGET_FAILED / $TOTAL"
           if [ $TOTAL -gt 0 ]; then
-            FLAKE_RATE=$((TARGET_FAILED * 100 / TOTAL))
-            echo ""
-            echo "FLAKE RATE: ${FLAKE_RATE}% ($TARGET_FAILED / $TOTAL)"
-          fi
-
-          echo ""
-          if [ $TARGET_FAILED -gt 0 ]; then
-            echo "STATUS: FLAKINESS REPRODUCED!"
-          else
-            echo "STATUS: No flakiness detected in $TOTAL runs"
+            echo "FLAKE RATE: $((TARGET_FAILED * 100 / TOTAL))%"
           fi
